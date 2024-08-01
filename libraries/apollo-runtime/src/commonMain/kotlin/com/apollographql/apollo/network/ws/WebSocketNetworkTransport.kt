@@ -47,6 +47,8 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import okio.use
 
+private typealias HeaderProvider = suspend () -> List<HttpHeader>
+
 /**
  * A [NetworkTransport] that manages a single instance of a [WebSocketConnection].
  *
@@ -59,6 +61,7 @@ class WebSocketNetworkTransport
 private constructor(
     private val serverUrl: (suspend () -> String),
     private val headers: List<HttpHeader>,
+    private val headerProviders: List<HeaderProvider>,
     private val webSocketEngine: WebSocketEngine = DefaultWebSocketEngine(),
     private val idleTimeoutMillis: Long = 60_000,
     private val protocolFactory: WsProtocol.Factory = SubscriptionWsProtocol.Factory(),
@@ -189,12 +192,13 @@ private constructor(
             }
 
             val webSocketConnection = try {
+              val computedHeaders = headers + headerProviders.flatMap { it() }
               webSocketEngine.open(
                   url = serverUrl(),
-                  headers = if (headers.any { it.name == "Sec-WebSocket-Protocol" }) {
-                    headers
+                  headers = if (computedHeaders.any { it.name == "Sec-WebSocket-Protocol" }) {
+                    computedHeaders
                   } else {
-                    headers + HttpHeader("Sec-WebSocket-Protocol", protocolFactory.name)
+                    computedHeaders + HttpHeader("Sec-WebSocket-Protocol", protocolFactory.name)
                   },
               )
             } catch (e: Exception) {
@@ -363,7 +367,8 @@ private constructor(
 
   class Builder {
     private var serverUrl: (suspend () -> String)? = null
-    private var headers: MutableList<HttpHeader> = mutableListOf()
+    private val headers: MutableList<HttpHeader> = mutableListOf()
+    private val headerProviders: MutableList<HeaderProvider> = mutableListOf()
     private var webSocketEngine: WebSocketEngine? = null
     private var idleTimeoutMillis: Long? = null
     private var protocolFactory: WsProtocol.Factory? = null
@@ -397,6 +402,16 @@ private constructor(
 
     fun addHeader(name: String, value: String) = apply {
       this.headers += HttpHeader(name, value)
+    }
+
+    /**
+     * Add headers that will be provided when the WebSocket connection is being established.
+     *
+     * @param headers a function that returns a list of headers to add to the request. This function will
+     * be invoked each time a WebSocket is opened.
+     */
+    fun addHeaders(headers: HeaderProvider) = apply {
+      this.headerProviders += headers
     }
 
     fun addHeaders(headers: List<HttpHeader>) = apply {
@@ -438,6 +453,7 @@ private constructor(
       return WebSocketNetworkTransport(
           serverUrl = serverUrl ?: error("No serverUrl specified"),
           headers = headers,
+          headerProviders = headerProviders,
           webSocketEngine = webSocketEngine ?: DefaultWebSocketEngine(),
           idleTimeoutMillis = idleTimeoutMillis ?: 60_000,
           protocolFactory = protocolFactory ?: SubscriptionWsProtocol.Factory(),
